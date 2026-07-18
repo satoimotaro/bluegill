@@ -284,6 +284,13 @@ t1_int_not_bidir:
     mov  Temp5, #07h
 
 t1_int_not_bidir_do_not_boost:
+    ; BlueGill S1: snapshot the clean 11-bit throttle magnitude for sine_run BEFORE the
+    ; startup boost (direction is carried separately in Flag_Rcp_Dir_Rev). This is the
+    ; only value sine_run reads from the RC path; it does NOT alter the stock flow.
+    jnb  Flag_Sine_Run, t1_int_no_sine_snapshot
+    mov  Sine_Rcp_L, Temp4
+    mov  Sine_Rcp_H, Temp5
+t1_int_no_sine_snapshot:
     ; Do not boost when changing direction in bidirectional mode
     jb   Flag_Motor_Started, t1_int_startup_boosted
 
@@ -318,6 +325,16 @@ t1_int_stall_boost:
     mov  Temp5, #07h
 
 t1_int_startup_boosted:
+    ; [BlueGill S3] Smooth-handoff duty rescale: only while the crossover is ENGAGED in 6-step
+    ; (sine-capable mode set, but currently NOT in the sine loop -> Flag_Sine_Run clear, motor
+    ; running). Rewrites Temp4/Temp5 to a deterministic affine of the throttle so thrust->speed is
+    ; continuous across the seam instead of jumping to the open-loop duty's natural speed. Stock
+    ; mode-0 (Flag_Sine_Mode clear), the sine loop (Flag_Sine_Run set), and startup are untouched.
+    jnb  Flag_Sine_Mode, t1_int_no_cross_rescale
+    jb   Flag_Sine_Run, t1_int_no_cross_rescale
+    jnb  Flag_Motor_Started, t1_int_no_cross_rescale
+    call cross_rescale_duty
+t1_int_no_cross_rescale:
     ; Set 8-bit value
     mov  A, Temp4
     anl  A, #0F8h
@@ -415,6 +432,11 @@ ELSEIF PWM_BITS_H == PWM_8_BIT
 ENDIF
 
 t1_int_set_pwm:
+; BlueGill S1: single-duty-writer invariant. In sine mode sine_run owns the PWM/damp
+; auto-reload registers, so skip ONLY the register writes below (the deadtime skew and
+; the Set_Power/Set_Damp_Pwm_Reg block). Everything after this block (Rcp_Timeout_Cntd
+; reload, telemetry scheduling, Flag_Rcp_Stop handling) still runs unchanged.
+    jb   Flag_Sine_Run, t1_int_pwm_written
 ; Set PWM registers
 IF DEADTIME != 0
     ; Subtract dead time from normal pwm and store as damping PWM
@@ -470,6 +492,7 @@ ELSE
 ENDIF
 ENDIF
 
+t1_int_pwm_written:                     ; BlueGill S1 sine-mode gate lands here (duty regs untouched)
     mov  Rcp_Timeout_Cntd, #10          ; Set timeout count
 
     ; Prepare DShot telemetry

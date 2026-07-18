@@ -253,57 +253,18 @@ beacon_beep_exit:
 ;
 ; Play beep melody
 ;
-; Plays a beep melody from eeprom storage
+; [BlueGill S3 flash trim] The startup beep MELODY player is removed here to free app
+; CODE-segment space for the S3 sine<->6-step crossover "catch a spinning rotor" machinery
+; (the 48 kHz build otherwise overflows the ?CO?BLUEJAY?20 0x19FD ceiling by 9 bytes). The
+; startup jingle is non-essential on this board: BlueGill uses reliable DShot bidirectional
+; telemetry (not audio) for identification/health, and all FUNCTIONAL beeps below
+; (RC-detect, arm, beacon locate, signal-lost, motor-stalled, bootloader) are UNCHANGED.
+; The stub keeps the symbol so the single caller (Bluejay.asm) links regardless; the
+; Eep_Pgm_Beep_Melody table stays at CSEG_MELODY (fixed segment, no app-CSEG cost).
 ;
-; A melody has 64 pairs of (item1, item2) - a total of 128 items.
-; the first 4 values of the 128 items are metadata
-; item2 - is the duration of each pulse of the musical note.
-;         The lower the value, the higher the pitch.
-; item1 - if item2 is zero, it is the number of milliseconds of wait time, else
-;         it is the number of pulses of item2.
-;
-; Requirements:
-; - Interrupts must be disabled
-; - FETs must be turned off
-;
+; Requirements: interrupts disabled, FETs off (unchanged; the stub is trivially safe).
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 play_beep_melody:
-    mov  DPTR, #(Eep_Pgm_Beep_Melody)
-    clr  A
-    movc A, @A+DPTR
-    cpl  A
-    jz   play_beep_melody_exit          ; If first byte is 255,skip startup melody (settings may be invalid)
-
-    mov  Temp5, #62
-    mov  DPTR, #(Eep_Pgm_Beep_Melody + 04h)
-
-play_beep_melody_loop:
-    ; Read current location at Eep_Pgm_Beep_Melody to Temp4 and increment DPTR. If the value is 0, no point trying to play this note
-    clr  A
-    movc A, @A+DPTR
-    inc  DPTR
-    mov  Temp4, A
-    jz   play_beep_melody_exit
-
-    ; Read current location at Eep_Pgm_Beep_Melody to Temp3. If the value zero, that means this is a silent note
-    clr  A
-    movc A, @A+DPTR
-    mov  Temp3, A
-    jz   play_beep_melody_item_wait_ms
-    call beep
-    sjmp play_beep_melody_loop_next_item
-
-play_beep_melody_item_wait_ms:
-    mov  A, Temp4
-    mov  Temp2, A
-    mov  Temp3, #0
-    call wait_ms
-
-play_beep_melody_loop_next_item:
-    inc  DPTR
-    djnz Temp5, play_beep_melody_loop
-
-play_beep_melody_exit:
     ret
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****

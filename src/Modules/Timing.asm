@@ -522,6 +522,12 @@ store_times_decrease_fast:
     mov  Wt_Adv_Start_L, Temp3          ; New commutation advance time (~15deg nominal)
 
 calc_new_wait_times_exit:
+    ; BlueGill: the direct commutation-timing-angle override (0x2B / apply_comm_timing_angle)
+    ; was REMOVED — bench-confirmed the S3 crossover locks BOTH directions with the stock 1..5
+    ; preset path at comm_timing_angle=0 (the "reverse won't lock" it chased was a host-side
+    ; measurement artifact, not firmware timing). The 0x2B byte is still decoded but unused; the
+    ; reclaimed flash funds the S3 smooth-handoff duty rescale (cross_rescale_duty). Stock preset
+    ; result stands unchanged.
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ;

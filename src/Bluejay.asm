@@ -175,6 +175,60 @@ DEFAULT_PGM_BRAKING_STRENGTH EQU 255    ; 0..255 => 0..100 % Braking
 
 DEFAULT_PGM_SAFETY_ARM EQU 0            ; EDT safety arm is disabled by default
 
+; BlueGill added parameters (all default OFF => byte-identical stock behavior)
+DEFAULT_PGM_COMM_TIMING_ANGLE EQU 0     ; 0=Off(use 1..5 preset),1..17 = 0..30 deg advance (1.875 deg/step)
+DEFAULT_PGM_MAX_ERPM EQU 0              ; 0=Off, else eRPM cap in units of 1000 eRPM
+DEFAULT_PGM_LOWSPEED_DAMPING EQU 0      ; 0=Off, else braking strength used below low-speed threshold
+
+; BlueGill low-speed damping engage/release thresholds (Comm_Period4x_H, larger = slower)
+LOWSPEED_DAMPING_THR EQU 020h           ; Engage damping when Comm_Period4x_H >= this (~1430 mech rpm @7pp)
+LOWSPEED_DAMPING_REL EQU 01Ch           ; Release when Comm_Period4x_H < this (hysteresis)
+
+; BlueGill S1 forced-commutation stepper defaults (all timid => cautious bench ramp)
+DEFAULT_PGM_SINE_MODE EQU 0            ; 0=Off (stock 6-step/BEMF), 1=forced-commutation stepper
+DEFAULT_PGM_SINE_HOLD_AMP EQU 8       ; ~3% duty zero-speed holding amplitude (8-bit throttle-equiv)
+DEFAULT_PGM_SINE_AMP_MAX EQU 20      ; ~8% duty V/f amplitude ceiling
+DEFAULT_PGM_SINE_RAMP EQU 16          ; speed slew rate (inc-LSB/tick; ~1 s 0->full-scale)
+
+; BlueGill S3 sine<->BEMF-6-step crossover thresholds (both default OFF => no crossover;
+; modes 0/1/2 byte-identical). Cross_Up in Sine_Inc_H units (~39.06 eRPM/unit, >= = faster);
+; Cross_Dn in Comm_Period4x_H units (~312500 eRPM/unit INVERSE, >= = slower).
+DEFAULT_PGM_SINE_CROSS_UP EQU 0        ; 0=Off; forced-sine -> BEMF up-handoff threshold (0x32)
+DEFAULT_PGM_SINE_CROSS_DN EQU 0        ; 0=Off; BEMF -> forced-sine down-handoff threshold (0x33)
+
+; BlueGill S1 stepper fixed-point constants. MUST MATCH tools/sim/sine_drive_model.py.
+; Timer2 runs at SYSCLK/12 = 4 MHz during run (48 MHz core on BB21), so a tick of
+; SINE_TICK_T2 = 4000 Timer2 ticks = 1.000 ms (1 kHz control rate).
+SINE_TICK_T2 EQU 4000                  ; Timer2 ticks per control tick (1.000 ms @ 4 MHz)
+SINE_RCP_SHIFT EQU 3                    ; per-tick step-rate target = Sine_Rcp << 3 (x8)
+SINE_HOLD_AMP_CLAMP EQU 40             ; decode clamp: hold amplitude ceiling
+SINE_AMP_MAX_CLAMP EQU 60              ; decode clamp: V/f amplitude ceiling
+
+; BlueGill S3: up-handoff debounce. Sine_Cross_Cnt must reach this (in matched-direction,
+; at/above-threshold control ticks) before a forced-sine -> BEMF handoff is allowed. ~16 ms.
+SINE_CROSS_DEBOUNCE EQU 16
+
+; BlueGill S3: the up-handoff seeds Comm_Period4x = Sine_Step_Ticks * 2000 measured over a
+; 4-SECTOR window (reset entering sector 3, read entering sector 1). The window must fall in
+; [MIN,MAX] whole 1 kHz ticks or the handoff is refused (rotor stays safely in forced sine):
+;  * TICKS_MIN caps the ONE-SHOT seed quantization: 1/9 ~= 11% worst-case relative error, so a
+;    too-fast crossover config can never silently seed BEMF with a badly-wrong period.
+;  * TICKS_MAX is the BEMF speed floor (~20000/30 ~= 667... i.e. 40000/30 ~= 1333 eRPM, just
+;    above the stock 6-step floor) and also keeps ticks*2000 within 16 bits.
+SINE_CROSS_TICKS_MIN EQU 9
+SINE_CROSS_TICKS_MAX EQU 30
+
+; BlueGill S2: free PCA module 2 (CEX2) auto-reload write macros. The vendor Base.inc
+; only defines module-0 (POWER) and module-1 (DAMP) macros; S2 adds a THIRD modulated
+; phase on the otherwise-unused module 2. Kept here (NOT in vendor/) per overlay
+; discipline. PCA0CPL2/PCA0CPH2 are the module-2 auto-reload low/high registers.
+Set_Power2_Pwm_Reg_L MACRO value
+    mov  PCA0CPL2, value
+ENDM
+Set_Power2_Pwm_Reg_H MACRO value
+    mov  PCA0CPH2, value
+ENDM
+
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ; Temporary register definitions
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
@@ -226,6 +280,11 @@ Flags3: DS 1                            ; State flags. NOT reset upon motor_star
     Flag_Telemetry_Pending BIT Flags3.0 ; DShot telemetry data packet is ready to be sent
     Flag_Had_Signal BIT Flags3.1        ; Used to detect reset after having had a valid signal
     Flag_User_Reverse_Requested BIT Flags3.2 ; It is set when user request to reverse motors in turtle mode
+    Flag_Sine_Mode BIT Flags3.3         ; BlueGill S1: forced-commutation stepper mode enabled (from param, NOT reset on motor_start)
+    Flag_Sine_Run BIT Flags3.4          ; BlueGill S1: sine_run loop is active (single-duty-writer gate for t1_int; cleared in exit_run_mode)
+    Flag_Sine_Micro BIT Flags3.5        ; BlueGill S2: min-clamp two-phase micro-stepping (Pgm_Sine_Mode==2; from param, NOT reset on motor_start)
+    Flag_Sine_Handoff BIT Flags3.6      ; BlueGill S3: BEMF->sine down-handoff pending. Set in run6_check_speed, consumed+cleared at sine_run entry; MUST be in Flags3 (not cleared by motor_start's Flags0/1 wipe)
+    Flag_Cross_Up_Armed BIT Flags3.7    ; BlueGill S3: forced-sine->BEMF up-handoff armed this tick. Set in sine_cross_update, ret's up the call chain, consumed by sine_run_loop -> ljmp sine_cross_up at baseline (no manual SP surgery). Cleared at sine_run entry.
 
 
 Tlm_Data_L: DS 1                        ; DShot telemetry data (lo byte)
@@ -293,6 +352,35 @@ DShot_GCR_Start_Delay: DS 1
 Ext_Telemetry_L: DS 1                   ; Extended telemetry data to be sent
 Ext_Telemetry_H: DS 1
 Scheduler_Counter: DS 1                 ; Scheduler Heartbeat
+
+; BlueGill decoded run-time variables (free space 0x68..0x7F)
+Pwm_Limit_By_Erpm: DS 1                 ; eRPM cap governor limit (8-bit), 255 = no cap
+Comm_Timing_Angle_Adj: DS 1             ; Decoded direct timing angle: 0=off, else 1..17
+Max_Erpm_Cap_L: DS 1                    ; eRPM cap as Comm_Period4x threshold (lo)
+Max_Erpm_Cap_H: DS 1                    ; eRPM cap as Comm_Period4x threshold (hi)
+Max_Erpm_Rel_L: DS 1                    ; eRPM cap release threshold w/ hysteresis (lo)
+Max_Erpm_Rel_H: DS 1                    ; eRPM cap release threshold w/ hysteresis (hi)
+LowSpeed_Damping_State: DS 1            ; 0 = programmed braking, 1 = damping override active
+
+; BlueGill S1 forced-commutation stepper state (direct-addressed, free RAM 0x6F..0x78)
+Sine_Rcp_L: DS 1                        ; 11-bit throttle magnitude snapshot from t1_int (lo)
+Sine_Rcp_H: DS 1                        ; 11-bit throttle magnitude snapshot from t1_int (hi, 3-bit)
+Sine_Sector: DS 1                       ; Current commutation sector 1..6 (forward order only)
+Sine_Frac_L: DS 1                       ; Angle accumulator (lo)
+Sine_Frac_H: DS 1                       ; Angle accumulator (hi) - advance one sector on 16-bit overflow
+Sine_Inc_L: DS 1                        ; Slewed step-rate magnitude added per control tick (lo)
+Sine_Inc_H: DS 1                        ; Slewed step-rate magnitude added per control tick (hi)
+Sine_Amp: DS 1                          ; Current V/f amplitude (8-bit throttle-equivalent, <= Pwm_Limit)
+Sine_T2_L: DS 1                         ; Timer2 pacing baseline snapshot (lo)
+Sine_T2_H: DS 1                         ; Timer2 pacing baseline snapshot (hi)
+; BlueGill S2 min-clamp two-phase micro-stepping state (only used when Flag_Sine_Micro)
+Sine_Seg: DS 1                          ; Applied clamp phase 0=A/1=B/2=C (0FFh = none yet -> force remux)
+Sine_G: DS 1                            ; This-tick electrical position g_eff (0..191, 192 microsteps/erev)
+Sine_D_Pair: DS 1                       ; This-tick duty (8-bit) for the pair phase (PCA modules 0/1)
+Sine_D_Second: DS 1                     ; This-tick duty (8-bit) for the second phase (PCA module 2 / CEX2)
+; BlueGill S3 crossover counters (hot, direct-addressed; tail of the 0x30 DSEG, 0x7D..0x7E)
+Sine_Step_Ticks: DS 1                   ; Control ticks in the current 4-sector window (reset entering sector 3, spans sectors 3..6); read at sector-1 entry -> up-handoff Comm_Period4x seed (0x7D)
+Sine_Cross_Cnt: DS 1                     ; Up-handoff debounce: inc-sat while at/above Cross_Up in matched direction, reset otherwise (0x7E)
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ; Indirect addressing data segments
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
@@ -337,9 +425,26 @@ Pgm_Brake_On_Stop: DS 1                 ; Braking when throttle is zero
 Pgm_LED_Control: DS 1                   ; LED control
 Pgm_Power_Rating: DS 1                  ; Power rating
 Pgm_Safety_Arm: DS  1                   ; Various flag settings: bit 0 is require edt enable to arm
+Pgm_Comm_Timing_Angle: DS 1             ; BlueGill: direct commutation timing angle (0=off, 1..17)
+Pgm_Max_Erpm: DS 1                      ; BlueGill: eRPM cap (0=off, units of 1000 eRPM)
+Pgm_LowSpeed_Damping: DS 1              ; BlueGill: low-speed damping braking strength (0=off)
+Pgm_Sine_Mode: DS 1                     ; BlueGill S1: forced-commutation stepper mode (0=off) (0x2E)
+Pgm_Sine_Hold_Amp: DS 1                 ; BlueGill S1: zero-speed holding amplitude, 8-bit throttle-equiv (0x2F)
+Pgm_Sine_Amp_Max: DS 1                  ; BlueGill S1: V/f amplitude ceiling, 8-bit throttle-equiv (0x30)
+Pgm_Sine_Ramp: DS 1                     ; BlueGill S1: speed slew rate, inc-LSB per control tick (0x31)
+; BlueGill S3 crossover params. MUST stay contiguous (0xAF, 0xB0) right after Pgm_Sine_Ramp
+; and in the SAME order as the Eep_ list below: vendor Eeprom.asm walks _Pgm_Enable_TX_Program
+; (0x8C) for EEPROM_B2_PARAMETERS_COUNT bytes in lockstep (inc DPTR/inc Temp1), so RAM addr and
+; count must agree. 0x8C + 37 - 1 = 0xB0 = Pgm_Sine_Cross_Dn.
+Pgm_Sine_Cross_Up: DS 1                 ; BlueGill S3: forced-sine -> BEMF up-handoff threshold (0x32, 0xAF)
+Pgm_Sine_Cross_Dn: DS 1                 ; BlueGill S3: BEMF -> forced-sine down-handoff threshold (0x33, 0xB0)
 
-ISEG AT 0B0h
-Stack: DS 16                            ; Reserved stack space
+ISEG AT 0B2h                            ; Moved from 0B0h: 0xAF/0xB0 now hold the two S3 params (0xB1 spare)
+Stack: DS 16                            ; Reserved stack space (0xB2-0xC1; mov SP,#Stack is symbolic)
+
+ISEG AT 0C2h                            ; Cold, indirect-only: down-handoff field-rate seed (0xC2-0xC3)
+Sine_Inc_Seed_L: DS 1                   ; BlueGill S3: Sine_Inc seed = 2048000/Cross_Dn (down-handoff), lo
+Sine_Inc_Seed_H: DS 1                   ; BlueGill S3: down-handoff Sine_Inc seed, hi
 
 ISEG AT 0D0h
 Temp_Storage: DS 48                     ; Temporary storage (internal memory)
@@ -351,8 +456,8 @@ Temp_Storage: DS 48                     ; Temporary storage (internal memory)
 CSEG AT CSEG_EEPROM
 EEPROM_FW_MAIN_REVISION EQU 0           ; Main revision of the firmware
 EEPROM_FW_SUB_REVISION EQU 21           ; Sub revision of the firmware
-EEPROM_LAYOUT_REVISION EQU 208          ; Revision of the EEPROM layout
-EEPROM_B2_PARAMETERS_COUNT EQU 28       ; Number of parameters
+EEPROM_LAYOUT_REVISION EQU 226          ; Revision of the EEPROM layout (BlueGill fork marker; S1 sine + S3 crossover params)
+EEPROM_B2_PARAMETERS_COUNT EQU 37       ; Number of parameters (28 stock + 3 BlueGill + 4 S1 sine + 2 S3 crossover)
 
 Eep_FW_Main_Revision: DB EEPROM_FW_MAIN_REVISION ; EEPROM firmware main revision number
 Eep_FW_Sub_Revision: DB EEPROM_FW_SUB_REVISION ; EEPROM firmware sub revision number
@@ -398,13 +503,26 @@ Eep_Pgm_Brake_On_Stop: DB DEFAULT_PGM_BRAKE_ON_STOP ; EEPROM copy of programmed 
 Eep_Pgm_LED_Control: DB DEFAULT_PGM_LED_CONTROL ; EEPROM copy of programmed LED control
 Eep_Pgm_Power_Rating: DB DEFAULT_PGM_POWER_RATING ; EEPROM copy of programmed power rating
 Eep_Pgm_Safety_Arm: DB DEFAULT_PGM_SAFETY_ARM ; Various flag settings: bit 0 is require edt enable to arm
+Eep_Pgm_Comm_Timing_Angle: DB DEFAULT_PGM_COMM_TIMING_ANGLE ; BlueGill: direct commutation timing angle (0x2B)
+Eep_Pgm_Max_Erpm: DB DEFAULT_PGM_MAX_ERPM ; BlueGill: eRPM cap (0x2C)
+Eep_Pgm_LowSpeed_Damping: DB DEFAULT_PGM_LOWSPEED_DAMPING ; BlueGill: low-speed damping (0x2D)
+Eep_Pgm_Sine_Mode: DB DEFAULT_PGM_SINE_MODE ; BlueGill S1: forced-commutation stepper mode (0x2E)
+Eep_Pgm_Sine_Hold_Amp: DB DEFAULT_PGM_SINE_HOLD_AMP ; BlueGill S1: zero-speed holding amplitude (0x2F)
+Eep_Pgm_Sine_Amp_Max: DB DEFAULT_PGM_SINE_AMP_MAX ; BlueGill S1: V/f amplitude ceiling (0x30)
+Eep_Pgm_Sine_Ramp: DB DEFAULT_PGM_SINE_RAMP ; BlueGill S1: speed slew rate (0x31)
+Eep_Pgm_Sine_Cross_Up: DB DEFAULT_PGM_SINE_CROSS_UP ; BlueGill S3: up-handoff threshold (0x32)
+Eep_Pgm_Sine_Cross_Dn: DB DEFAULT_PGM_SINE_CROSS_DN ; BlueGill S3: down-handoff threshold (0x33)
 
 Eep_Dummy: DB 0FFh                      ; EEPROM address for safety reason
 CSEG AT CSEG_NAME
 Eep_Name: DB "Bluejay (.0)    "         ; Name tag (16 Bytes)
 
 CSEG AT CSEG_MELODY
-Eep_Pgm_Beep_Melody: DB 2,58,4,32,52,66,13,0,69,45,13,0,52,66,13,0,78,39,211,0,69,45,208,25,52,25,0
+; BlueGill startup jingle — "Under the Sea" hook (G G G E, then G G G C^) so a fresh
+; BlueGill flash is identifiable by ear. Format: (pulses,pitch) note pairs after a 4-byte
+; header; pitch is the pulse half-period (LOWER value = HIGHER note); (ms,0) = silent gap;
+; trailing 0 = end. Pitches: G5=51, E5=61 (lower), C6=38 (higher). ~1.3 s total.
+Eep_Pgm_Beep_Melody: DB 2,58,4,32,255,16,111,20,99,24,120,0,166,31,120,0,254,16,111,20,99,24,120,0,254,16,0
 
     Interrupt_Table_Definition          ; SiLabs interrupts
 CSEG AT CSEG_APP                        ; Code segment after interrupt vectors
@@ -419,6 +537,7 @@ $include (Modules\Commutation.asm)
 $include (Modules\DShot.asm)
 $include (Modules\Eeprom.asm)
 $include (Modules\Settings.asm)
+$include (Modules\SineMode.asm)         ; BlueGill S1 forced-commutation stepper mode
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ;
@@ -496,7 +615,8 @@ clear_ram:
     ; Initializing beeps
     clr  IE_EA                          ; Disable interrupts explicitly
     call wait100ms                      ; Wait a bit to avoid audible resets if not properly powered
-    call play_beep_melody               ; Play startup beep melody
+    ; [BlueGill S3 flash trim] startup beep MELODY removed (freed app-CSEG flash for the S3
+    ; catch machinery; DShot telemetry replaces audio ID -- see Fx.asm play_beep_melody stub).
     call led_control                    ; Set LEDs to programmed values
 
     call wait100ms                      ; Wait for flight controller to get ready
@@ -762,6 +882,7 @@ motor_start:
     mov  Temp2, #Pgm_Startup_Power_Max
     mov  Pwm_Limit_Beg, @Temp2          ; Set initial pwm limit
     mov  Pwm_Limit_By_Rpm, Pwm_Limit_Beg
+    mov  Pwm_Limit_By_Erpm, #0FFh       ; BlueGill: reset eRPM cap governor to full power
 
     ; Set temperature PWM limit and setpoint to the maximum value
     mov  Pwm_Limit, Pwm_Limit_Beg
@@ -810,6 +931,15 @@ motor_start_bidir_done:
     ; Initialize commutation
     call comm5_comm6                    ; Initialize commutation
     call comm6_comm1
+
+    ; BlueGill S1: forced-commutation stepper mode. The init pair above already ran (so
+    ; interrupts are enabled and sector 1 is briefly energised at the stale reload, as on
+    ; the stock path); sine_run re-establishes a clean hold state before driving. It never
+    ; returns (it exits via exit_run_mode).
+    jnb  Flag_Sine_Mode, motor_start_no_sine
+    ljmp sine_run                       ; (long jump: sine_run is out of jb range)
+
+motor_start_no_sine:
     call initialize_timing              ; Initialize timing
     call calc_next_comm_period          ; Set virtual commutation point
     call initialize_timing              ; Initialize timing
@@ -843,6 +973,7 @@ run2:
     ; setup_comm_wait
     ; evaluate_comparator_integrity
     call set_pwm_limit                  ; Set pwm power limit for low or high rpm
+    call update_lowspeed_damping        ; BlueGill: switch braking strength at low speed
     call wait_for_comm
     call comm2_comm3
     call calc_next_comm_period
@@ -916,7 +1047,7 @@ run6:
     jnc  startup_phase_done
 
     jnb  Flag_Rcp_Stop, run1            ; If pulse is above stop value - Continue to run
-    sjmp exit_run_mode
+    ljmp exit_run_mode                  ; (long jump: BlueGill S3 down-handoff widened this span)
 
 startup_phase_done:
     ; Clear startup phase flag & remove pwm limits
@@ -981,6 +1112,23 @@ run6_check_bidir:
     jb   Flag_Pgm_Bidir, run6_bidir     ; Check if bidirectional operation
 
 run6_check_speed:
+    ; BlueGill S3: BEMF -> forced-sine down-handoff. Only when sine mode is configured and
+    ; Cross_Dn != 0. Fires when the rotor has slowed to/below the down threshold (larger
+    ; Comm_Period4x_H = slower), BEFORE the stock 0xF0 min-speed exit. Cross_Dn is clamped
+    ; <= 0xEF at decode so it always precedes 0xF0. Hands to sine via motor_start (Flag_Sine_Mode
+    ; branch -> sine_run), pre-seeding Sine_Inc from Sine_Inc_Seed through Flag_Sine_Handoff.
+    jnb  Flag_Sine_Mode, run6_check_speed_stock
+    mov  Temp1, #Pgm_Sine_Cross_Dn
+    mov  A, @Temp1
+    jz   run6_check_speed_stock         ; Cross_Dn == 0 -> down-handoff disabled
+    clr  C
+    mov  A, Comm_Period4x_H             ; Comm_Period4x_H >= Cross_Dn (slow enough for sine)?
+    subb A, @Temp1
+    jc   run6_check_speed_stock         ; still fast enough -> stay in BEMF
+    setb Flag_Sine_Handoff              ; (Flags3 survives motor_start's Flags0/1 wipe)
+    ljmp motor_start                    ; re-enter via the proven stall-restart shape
+
+run6_check_speed_stock:
     clr  C
     mov  A, Comm_Period4x_H             ; Is Comm_Period4x below minimum speed?
     subb A, #0F0h                       ; Default minimum speed (~1330 erpm)
@@ -991,13 +1139,23 @@ run6_bidir:
     ; Check if direction change braking is in progress
     jb   Flag_Dir_Change_Brake, run6_bidir_braking
 
-    ; Check if actual rotation direction matches force direction
+    ; [S3 direction fix] Sine-config 6-step runs with the field convention inverted vs stock,
+    ; so the expected spinning direction is (Flag_Rcp_Dir_Rev XOR Flag_Sine_Mode): == NOT
+    ; Flag_Rcp_Dir_Rev while in a sine config (Flag_Sine_Mode set), == Flag_Rcp_Dir_Rev
+    ; otherwise. Build that expected direction into C; the jb/jnb below never touch C, so it
+    ; survives the interleaved bit tests. With Flag_Sine_Mode clear this reduces to stock.
+    mov  C, Flag_Rcp_Dir_Rev            ; Read force direction
+    jnb  Flag_Sine_Mode, run6_bidir_dir_ready
+    cpl  C                              ; sine config: expected = NOT Flag_Rcp_Dir_Rev
+run6_bidir_dir_ready:
+
+    ; Check if actual rotation direction matches the expected direction (C)
     jb   Flag_Motor_Dir_Rev, run6_bidir_check_reversal
-    jb   Flag_Rcp_Dir_Rev, run6_bidir_reversal
+    jc   run6_bidir_reversal            ; Motor fwd, expected rev -> mismatch, reverse
     sjmp run6_check_speed
 
 run6_bidir_check_reversal:
-    jb   Flag_Rcp_Dir_Rev, run6_check_speed
+    jc   run6_check_speed               ; Motor rev, expected rev -> match
 
 run6_bidir_reversal:
     ; Initiate direction and start braking
@@ -1015,7 +1173,13 @@ run6_bidir_braking:
 
     ; Braking done, set new spinning direction
     clr  Flag_Dir_Change_Brake          ; Clear braking flag
+    ; [S3 direction fix] set the new spinning direction to the conjugated expected direction
+    ; (Flag_Rcp_Dir_Rev XOR Flag_Sine_Mode): sine-config 6-step runs Motor == NOT Rcp, else
+    ; Motor == Rcp. With Flag_Sine_Mode clear this is the stock `Flag_Motor_Dir_Rev := Rcp`.
     mov  C, Flag_Rcp_Dir_Rev            ; Read force direction
+    jnb  Flag_Sine_Mode, run6_bidir_brake_dir_ready
+    cpl  C                              ; sine config: Motor := NOT Flag_Rcp_Dir_Rev
+run6_bidir_brake_dir_ready:
     mov  Flag_Motor_Dir_Rev, C          ; Set spinning direction
     setb Flag_Initial_Run_Phase
     mov  Initial_Run_Rot_Cntd, #18
@@ -1038,6 +1202,7 @@ exit_run_mode:
     ; Disable all interrupts (they will be disabled for a while, be aware)
     clr  IE_EA
 
+    clr  Flag_Sine_Run                  ; BlueGill S1: leave sine mode (Flags3 is not cleared below)
     call switch_power_off
     mov  Flags0, #0                     ; Clear run time flags (in case they are used in interrupts)
     mov  Flags1, #0
