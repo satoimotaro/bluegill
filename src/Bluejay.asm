@@ -1068,7 +1068,7 @@ initial_run_phase:
     jnb  Flag_Rcp_Stop, run1            ; Check if pulse is below stop value
     jb   Flag_Pgm_Bidir, run1           ; Check if bidirectional operation
 
-    sjmp exit_run_mode
+    ljmp exit_run_mode                  ; (long jump: BlueGill neutral-stop insert widened this span)
 
 initial_run_phase_done:
     clr  Flag_Initial_Run_Phase         ; Clear initial run phase flag
@@ -1090,6 +1090,23 @@ normal_run_checks:
     mov  Startup_Stall_Cnt, #0
     setb Flag_Motor_Running
 
+    ; [BlueGill] Sine-config neutral STOP by throttle MAGNITUDE. In bidir the host's neutral does NOT
+    ; reliably set Flag_Rcp_Stop, and run6_bidir below false-reverses at neutral, so the rotor limps at
+    ; the ~386 BEMF floor ("0 rpm keeps spinning"). The ISR snapshots the clean 11-bit magnitude to
+    ; Sine_Rcp for sine configs; a near-zero magnitude = neutral -> leave to exit_run_mode ->
+    ; wait_for_start (ARMED, signal still present) for a real stop and a re-arm-free restart. Only fires
+    ; at true neutral (any RUNNING target keeps the magnitude well above the threshold). Gated on
+    ; Flag_Sine_Mode, so stock bidir stays byte-identical.
+    jnb  Flag_Sine_Mode, nrc_no_neutral
+    mov  A, Sine_Rcp_H
+    jnz  nrc_no_neutral                 ; magnitude >= 256 -> driving
+    clr  C
+    mov  A, Sine_Rcp_L
+    subb A, #16                         ; magnitude < 16 (of 2047) -> treat as neutral
+    jnc  nrc_no_neutral
+    ljmp exit_run_mode
+
+nrc_no_neutral:
     jnb  Flag_Rcp_Stop, run6_check_bidir ; Check if stop
     jb   Flag_Pgm_Bidir, run6_check_timeout ; Check if bidirectional operation
 

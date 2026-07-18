@@ -212,6 +212,10 @@ sine_run_loop:
     mov  A, Rcp_Timeout_Cntd
     jz   sine_run_exit
 
+    ; NOTE: neutral STOP is handled in 6-step (normal_run_checks, magnitude-based) which fires before the
+    ; down-handoff can enter sine, so a neutral never reaches this loop; adding a magnitude check HERE is
+    ; both redundant and unsafe (Sine_Rcp is 0 at sine_run entry, so it would abort every startup ramp).
+
     ; --- pacing: has a full control tick elapsed on Timer2? ---
     call sine_read_timer2               ; Temp1:Temp2 = now
     clr  C

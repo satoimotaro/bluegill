@@ -287,7 +287,10 @@ t1_int_not_bidir_do_not_boost:
     ; BlueGill S1: snapshot the clean 11-bit throttle magnitude for sine_run BEFORE the
     ; startup boost (direction is carried separately in Flag_Rcp_Dir_Rev). This is the
     ; only value sine_run reads from the RC path; it does NOT alter the stock flow.
-    jnb  Flag_Sine_Run, t1_int_no_sine_snapshot
+    ; Snapshot for ALL sine configs (not just while the sine loop runs): sine_run reads it as its target,
+    ; and run6 reads it to detect a true neutral by magnitude (Flag_Rcp_Stop is unreliable in bidir).
+    ; Gated on Flag_Sine_Mode so a stock (mode-0) build is byte-identical.
+    jnb  Flag_Sine_Mode, t1_int_no_sine_snapshot
     mov  Sine_Rcp_L, Temp4
     mov  Sine_Rcp_H, Temp5
 t1_int_no_sine_snapshot:
