@@ -27,3 +27,7 @@
 # python cache
 __pycache__/
 *.pyc
+
+# committed reference images (exempt from *.hex above)
+!/prebuilt/
+!/prebuilt/*.hex
