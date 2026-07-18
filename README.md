@@ -39,6 +39,21 @@ Modified: `src/Bluejay.asm`, `src/Modules/{Settings,Power,Isrs,Fx,Timing}.asm`; 
 To pull upstream fixes later: `git remote add upstream https://github.com/bird-sanctuary/bluejay` then
 cherry-pick / merge.
 
+## Prebuilt images
+
+Ready-to-flash hex for the reference ESC (LittleBee Spring 30A, EFM8BB21, **Layout A**, deadtime 30) are
+committed in [`prebuilt/`](prebuilt/) so you don't have to set up the toolchain:
+
+- `BlueGill_A_H_30_48_v0.21.0.hex` — **48 kHz**, the hardware-verified image (closed-loop velocity +
+  neutral-stop bench runs).
+- `BlueGill_A_H_30_24_v0.21.0.hex` — **24 kHz**, `target.env`'s documented thruster default (more duty
+  resolution at low speed); bench-verify before relying on it.
+
+Both are provided — pick the PWM you want. See [`prebuilt/README.md`](prebuilt/README.md) for sha256 and
+flashing. **Layout A only:** the sine drive is hardwired to Layout A's pin order (`SineMode.asm` refuses
+to assemble on other layouts to avoid a wrong-FET image), so other layouts must build from source after
+porting the sine commutation.
+
 ## Build
 
 8051 assembly built with the **Keil C51** toolchain (`AX51`/`LX51`/`Ohx51`) under **Wine** — same as
