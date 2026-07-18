@@ -1,5 +1,29 @@
-/build
+# build artifacts (repo-root output dirs only — NOT tools/build/)
+/build/
+/out/
+/dist/
+*.hex
+*.omf
+*.lst
+*.map
+*.OBJ
+*.obj
+*.OMF
+*.LST
+*.MAP
+
+# toolchain temp / Keil-under-Wine
+*.tmp
 /tools/.wine
 *.diff
 .project
 
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# python cache
+__pycache__/
+*.pyc
