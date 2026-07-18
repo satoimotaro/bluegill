@@ -247,6 +247,27 @@ sine_run_service:
     ; Telemetry + scheduler, mirroring wait_for_start (do not create a packet while one
     ; is pending; scheduler_run self-gates on Flag_16ms_Elapsed).
     jb   Flag_Telemetry_Pending, sine_run_loop
+    ; BlueGill S3: VIRTUAL eRPM for sine. There is no BEMF period here, so seed Comm_Period4x from the
+    ; FORCED field rate (Sine_Inc), making DShot eRPM telemetry CONTINUOUS 0->sine->6-step (the host
+    ; loop is otherwise blind in sine). eRPM = Sine_Inc*10000/65536 and Comm_Period4x = 80e6/eRPM, so
+    ; Comm_Period4x = 524288000/Sine_Inc = 2048000/(Sine_Inc/256) ~= 2048000/Sine_Inc_H -> reuse
+    ; div_2048000 (the seed's 24/8 core; quotient clamps to 0xFFFF, so below ~174 mech eRPM floors).
+    ; div clobbers Temp2-8 but sine_tick already reuses them each tick, and the governor only caps on a
+    ; HIGH eRPM (small period) which sine never reaches -> safe to leave Comm_Period4x at the sine rate.
+    mov  A, Sine_Inc_H
+    jz   sine_tlm_stopped
+    call div_2048000                    ; Temp3=lo, Temp4=hi = 2048000/Sine_Inc_H (clamped 0xFFFF)
+    clr  IE_EA
+    mov  Comm_Period4x_L, Temp3
+    mov  Comm_Period4x_H, Temp4
+    setb IE_EA
+    sjmp sine_tlm_build
+sine_tlm_stopped:
+    clr  IE_EA
+    mov  Comm_Period4x_L, #0FFh          ; ~stopped -> slowest reportable period
+    mov  Comm_Period4x_H, #0FFh
+    setb IE_EA
+sine_tlm_build:
     call dshot_tlm_create_packet
     call scheduler_run
     sjmp sine_run_loop
