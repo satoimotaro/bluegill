@@ -218,6 +218,13 @@ SINE_CROSS_DEBOUNCE EQU 16
 SINE_CROSS_TICKS_MIN EQU 9
 SINE_CROSS_TICKS_MAX EQU 30
 
+; BlueGill S3: down-handoff phase seed. The 6-step electrical state at a BEMF->sine
+; down-handoff is deterministic (always program-state 1: run6_check_speed fires right
+; after comm6_comm1), which maps to this sine sector for BOTH commanded directions (the
+; comm* routines' Flag_Motor_Dir_Rev branch absorbs the physical mirror -- see PLAN A.1).
+; TUNABLE: the bench sector scan confirms the constant (scan order 6, 2, 5, 3, 4).
+SINE_DN_SEED_SECTOR EQU 6
+
 ; BlueGill S2: free PCA module 2 (CEX2) auto-reload write macros. The vendor Base.inc
 ; only defines module-0 (POWER) and module-1 (DAMP) macros; S2 adds a THIRD modulated
 ; phase on the otherwise-unused module 2. Kept here (NOT in vendor/) per overlay
