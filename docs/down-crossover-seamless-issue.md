@@ -55,6 +55,20 @@ Bench: F2838 350KV + small prop, AS5600, 11.1V. Flashed the seed build, drove vi
   needed — the down-handoff likely must transition WITHOUT motor_start's power-off (stay energised),
   mirroring why the up-catch works. Sector seed may still be necessary but is insufficient alone.
 
+## Isolation experiment 2026-07-26 (Sine_Inc RULED OUT → motor_start is the cause)
+Rebuilt with `Sine_Inc=0` in the down-handoff branch (like the working cross_dn=255 fallback) while
+KEEPING the sector seed. Result: **STILL STALLS** identically. So the dynamic Inc seed is NOT the
+culprit. Combined with the sector/mode scan, the stall is **the `motor_start` power-off gap**:
+run6_check_speed does `setb Flag_Sine_Handoff; ljmp motor_start`, and `motor_start`'s `switch_power_off`
+cuts the FETs mid-spin at ~187 mech; the seeded `sine_run` re-energise cannot recover the coasting
+rotor. The stock cross_dn=255 descent keeps rotating because it never routes through motor_start.
+
+**REDESIGN DIRECTION:** the down-handoff must transition 6-step→sine WITHOUT `motor_start`'s
+`switch_power_off` — re-energise the seeded sine sector directly from the live 6-step drive (stay
+energised across the seam), mirroring how the up-catch avoids a power-off. This is a control-flow
+change at the run6_check_speed→sine_run seam, not a constant. The sector seed (=6) and the Inc handling
+are still needed once the power-off is removed, but are insufficient while it remains.
+
 ## Subtasks (highest-risk-first)
 1. Baseline build/MAP. ✅ (A_H_30_24 top=0x19D7, 38 B free)
 2. Minimal down-seed experiment (sector seed + dynamic Inc seed; static Settings path kept) → HW sector scan on S2.
