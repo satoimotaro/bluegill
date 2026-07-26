@@ -125,20 +125,25 @@
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
-; Entry: reached from motor_start_bidir_done. The stock init pair (comm5_comm6 +
-; comm6_comm1) ran just before the branch, so interrupts are ENABLED and sector 1 is
-; briefly energised at the stale PCA reload (bounded by startup_power_max, deadtime
-; intact) — exactly as on the stock startup path. We take control, gate the ISR duty
-; writer, de-energise, install the hold duty, and only THEN re-energise sector 1, so
-; sine mode's first sustained drive is hold_amp rather than the stale reload. Never
-; returns (exits via exit_run_mode).
+; Entry: reached from motor_start_bidir_done on a COLD start, or DIRECTLY from
+; motor_start_seam on a BEMF->sine down-handoff (Flag_Sine_Handoff set). On a cold start
+; the stock init pair (comm5_comm6 + comm6_comm1) ran just before the branch, so
+; interrupts are ENABLED and sector 1 is briefly energised at the stale PCA reload
+; (bounded by startup_power_max, deadtime intact) — exactly as on the stock startup path;
+; we take control, gate the ISR duty writer, de-energise, install the hold duty, and only
+; THEN re-energise sector 1. On the down-handoff seam the FETs are ALREADY LIVE at the
+; run1 topology and IE_EA is off (from the seam): Flag_Sine_Handoff makes us SKIP the
+; switch_power_off below, keeping the rotor energised while we re-seed phase/speed and
+; take over make-before-break. Never returns (exits via exit_run_mode).
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 sine_run:
     clr  IE_EA                          ; the init pair left IE_EA enabled; take control
     setb Flag_Sine_Run                  ; [Inv 4] gate the ISR duty writer FIRST
 
+    jb   Flag_Sine_Handoff, sine_run_energised   ; seam: skip the power-off, keep FETs live
     ; [Inv 6] stop driving the FETs at the stale reload before touching the duty regs.
     call switch_power_off
+sine_run_energised:
 
     ; Initialise stepper state (Inc==0 => hold; direction = whatever motor_start selected).
     mov  Sine_Sector, #1
@@ -202,9 +207,11 @@ sine_run_inc_done:
     ; init pair after switch_power_off). This is the first energisation, now at hold_amp.
     jnb  Flag_Sine_Handoff, sine_run_s1_stock
     ; [S3 down-seed] seeded Sine_Sector = SINE_DN_SEED_SECTOR-1; one forward step energises
-    ; comm(SINE_DN_SEED_SECTOR-1)_comm(SINE_DN_SEED_SECTOR) -- an ABSOLUTE FET overwrite from the
-    ; all-off state left by switch_power_off (same shape as the up-catch energise :790-798; IE_EA
-    ; off, Flag_Sine_Run set => t1_int cannot write a duty), leaving Sine_Sector = SINE_DN_SEED_SECTOR.
+    ; comm(SINE_DN_SEED_SECTOR-1)_comm(SINE_DN_SEED_SECTOR) -- an ABSOLUTE FET overwrite. On the
+    ; down-handoff SEAM switch_power_off is SKIPPED, so this starts from the LIVE run1 topology
+    ; (comm6_comm1), NOT all-off: a genuine MAKE-BEFORE-BREAK handover. Shoot-through safety rests on
+    ; hardware deadtime + the disjoint-leg source swap (sink phase stays driven), not on a prior all-off
+    ; (IE_EA off, Flag_Sine_Run set => t1_int cannot write a duty), leaving Sine_Sector = SINE_DN_SEED_SECTOR.
     call sine_step_sector
     sjmp sine_run_enter_done
 sine_run_s1_stock:
