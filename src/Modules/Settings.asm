@@ -385,7 +385,9 @@ decode_sine_ramp_done:
     ; --- BlueGill S3 sine<->BEMF crossover thresholds (0x32/0x33) + down-handoff seed ---
     ; Both default OFF (0) => no crossover, modes 0/1/2 unchanged. A stale 0xFF reads as
     ; OFF. Cross_Dn is clamped < 0xF0 so a down-handoff always fires before the stock
-    ; min-speed exit. Sine_Inc_Seed = 2048000/Cross_Dn pre-seeds the field rate on re-entry.
+    ; min-speed exit. NOTE: sine_run now seeds the re-entry field rate LIVE from Comm_Period4x_H;
+    ; Sine_Inc_Seed (= 2048000/Cross_Dn) survives ONLY as the decode-time chatter-guard threshold
+    ; proxy below (its _H byte); the _L byte is an unused remnant of the old static seed.
     clr  Flag_Sine_Handoff              ; no pending handoff at init (set only by run6_check_speed)
 
     ; Cross_Up: 0xFF stale -> 0

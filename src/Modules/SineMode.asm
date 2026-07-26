@@ -162,11 +162,12 @@ sine_run_energised:
     jnb  Flag_Sine_Handoff, sine_run_inc_zero
     ; NOTE: do NOT clr Flag_Sine_Handoff here -- the S1/S2 energise steps below still branch
     ; on it. It is consumed at the single point sine_run_enter_done (after the energise).
-    ; [S3 direction fix] motor_start re-derived Flag_Motor_Dir_Rev from Flag_Pgm_Dir_Rev
-    ; (Bluejay.asm:912-918), NOT from sine's running direction. Sine's field convention is
-    ; Flag_Motor_Dir_Rev == Flag_Rcp_Dir_Rev, so re-assert it here (IE_EA is off since :134 =>
-    ; atomic) so sine resumes FORWARD after the down-handoff (fixes the decay-to-zero stall).
-    ; Only this handoff path re-asserts it; the normal-start sine_run_inc_zero path is unchanged.
+    ; [S3 direction fix] the down-handoff seam entered via motor_start_seam, which WIPED Flags0
+    ; (mov Flags0,A => Flag_Motor_Dir_Rev = 0) and SKIPPED motor_start_cold's dir-derive. Sine's
+    ; field convention is Flag_Motor_Dir_Rev == Flag_Rcp_Dir_Rev, so re-assert it here (IE_EA is off
+    ; from the seam => atomic) so sine resumes in the COMMANDED direction after the down-handoff --
+    ; a REVERSE command would otherwise resume FORWARD and brake/stall the rotor. Only this handoff
+    ; path re-asserts it; the normal-start sine_run_inc_zero path is unchanged.
     mov  C, Flag_Rcp_Dir_Rev
     mov  Flag_Motor_Dir_Rev, C
     ; [S3 down-seed / phase] Seed the TRUE electrical phase. The 6-step state at the down-handoff
