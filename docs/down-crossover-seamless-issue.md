@@ -1,7 +1,23 @@
 # Issue: seamless BEMF→sine DOWN crossover (down-handoff phase seed)
 
-Status: OPEN · Branch: `mas/bluegill-down-crossover` (off `docs/350kv-noload-crossover` @ 7d34fb6)
-Local-only repo (no remote) → issue tracked here; merge target `docs/350kv-noload-crossover`.
+Status: **RESOLVED (bench-proven 2026-07-26)** · Branch: `mas/bluegill-down-crossover` (off
+`docs/350kv-noload-crossover` @ 7d34fb6) · commit `1bc3d71`. Local-only repo (no remote) → issue tracked
+here; merge target `docs/350kv-noload-crossover` (NOT yet merged).
+
+## ✅ RESOLUTION (commit 1bc3d71): stay-energised seam
+The fix was NOT the sector seed (Subtask 2, falsified) but removing `motor_start`'s `switch_power_off`
+from the down transition. New seam: `run6_check_speed` → `clr IE_EA; ljmp motor_start_seam` → skips
+switch_power_off + the clock/DShot double-scale + Pwm_Limit/dir/startup/init → `sine_run` (gated skip of
+its own :141 switch_power_off). Rotor stays energised across the handoff. S1 = make-before-break
+(comm5_comm6 absolute overwrite from live run1, disjoint-leg swap, deadtime-safe); S2 keeps one µs remux
+blip that proved tolerable. **BENCH (350KV+prop, cross_dn=239, the exact stall repro): BOTH S1
+(sine_mode=1) and S2 (sine_mode=2) descend seamlessly — motor keeps rotating through ~187 mech, no
+stall-to-0; 3+ S2 repeats consistent.** +6 B (0x19EB/24k, 0x19F8/48k, both <0x19FD). Also fixed the
+latent clock double-scale on live handoffs. FET-safety reviewed SAFE-TO-FLASH.
+
+Remaining follow-ups (not blockers): low-speed sine is rough (amplitude tuning, separate); full mode-0
+regression sweep + the 10/10 formal acceptance runs; 48k flash headroom is only 5 B; merge to the docs
+branch when ready.
 
 ## Problem
 The S3 sine↔6-step crossover is built and the UP-handoff (forced-sine → BEMF) is bench-proven, but
