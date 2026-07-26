@@ -218,6 +218,13 @@ SINE_CROSS_DEBOUNCE EQU 16
 SINE_CROSS_TICKS_MIN EQU 9
 SINE_CROSS_TICKS_MAX EQU 30
 
+; BlueGill S3: down-handoff phase seed. The 6-step electrical state at a BEMF->sine
+; down-handoff is deterministic (always program-state 1: run6_check_speed fires right
+; after comm6_comm1), which maps to this sine sector for BOTH commanded directions (the
+; comm* routines' Flag_Motor_Dir_Rev branch absorbs the physical mirror -- see PLAN A.1).
+; TUNABLE: the bench sector scan confirms the constant (scan order 6, 2, 5, 3, 4).
+SINE_DN_SEED_SECTOR EQU 6
+
 ; BlueGill S2: free PCA module 2 (CEX2) auto-reload write macros. The vendor Base.inc
 ; only defines module-0 (POWER) and module-1 (DAMP) macros; S2 adds a THIRD modulated
 ; phase on the otherwise-unused module 2. Kept here (NOT in vendor/) per overlay
@@ -871,13 +878,18 @@ motor_start:
 
     call switch_power_off
 
+motor_start_seam:                       ; stay-energised down-handoff entry (FETs still live from run1)
     clr  A
-    mov  Flags0, #0                     ; Clear run time flags
-    mov  Flags1, #0
-    mov  Demag_Detected_Metric, #0      ; Clear demag metric
-    mov  Demag_Detected_Metric_Max, #0  ; Clear demag metric max
-    mov  Ext_Telemetry_H, #0            ; Clear extended telemetry data
+    mov  Flags0, A                      ; Clear run time flags (A==0 from clr A above; re-encoded to save bytes)
+    mov  Flags1, A
+    mov  Demag_Detected_Metric, A       ; Clear demag metric
+    mov  Demag_Detected_Metric_Max, A   ; Clear demag metric max
+    mov  Ext_Telemetry_H, A             ; Clear extended telemetry data
 
+    jnb  Flag_Sine_Handoff, motor_start_cold   ; cold starts fall through unchanged
+    ljmp sine_run                              ; seam: skip Pwm_Limit block, clock/DShot rescale,
+                                               ; dir derive, startup flags, init pair
+motor_start_cold:
     ; Set up start operating conditions
     mov  Temp2, #Pgm_Startup_Power_Max
     mov  Pwm_Limit_Beg, @Temp2          ; Set initial pwm limit
@@ -1132,8 +1144,9 @@ run6_check_speed:
     ; BlueGill S3: BEMF -> forced-sine down-handoff. Only when sine mode is configured and
     ; Cross_Dn != 0. Fires when the rotor has slowed to/below the down threshold (larger
     ; Comm_Period4x_H = slower), BEFORE the stock 0xF0 min-speed exit. Cross_Dn is clamped
-    ; <= 0xEF at decode so it always precedes 0xF0. Hands to sine via motor_start (Flag_Sine_Mode
-    ; branch -> sine_run), pre-seeding Sine_Inc from Sine_Inc_Seed through Flag_Sine_Handoff.
+    ; <= 0xEF at decode so it always precedes 0xF0. Hands to sine via the stay-energised seam
+    ; (motor_start_seam -> sine_run) WITHOUT switch_power_off or the clock/DShot rescale, so the
+    ; rotor stays driven across the handoff; Sine_Inc is seeded from the live period via Flag_Sine_Handoff.
     jnb  Flag_Sine_Mode, run6_check_speed_stock
     mov  Temp1, #Pgm_Sine_Cross_Dn
     mov  A, @Temp1
@@ -1143,7 +1156,8 @@ run6_check_speed:
     subb A, @Temp1
     jc   run6_check_speed_stock         ; still fast enough -> stay in BEMF
     setb Flag_Sine_Handoff              ; (Flags3 survives motor_start's Flags0/1 wipe)
-    ljmp motor_start                    ; re-enter via the proven stall-restart shape
+    clr  IE_EA                          ; atomic seam; FETs stay LIVE at the run1 topology (post comm6_comm1)
+    ljmp motor_start_seam               ; stay-energised seam: skip switch_power_off + clock/DShot rescale, keep rotor driven
 
 run6_check_speed_stock:
     clr  C

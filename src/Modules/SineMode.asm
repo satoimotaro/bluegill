@@ -125,20 +125,25 @@
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
-; Entry: reached from motor_start_bidir_done. The stock init pair (comm5_comm6 +
-; comm6_comm1) ran just before the branch, so interrupts are ENABLED and sector 1 is
-; briefly energised at the stale PCA reload (bounded by startup_power_max, deadtime
-; intact) — exactly as on the stock startup path. We take control, gate the ISR duty
-; writer, de-energise, install the hold duty, and only THEN re-energise sector 1, so
-; sine mode's first sustained drive is hold_amp rather than the stale reload. Never
-; returns (exits via exit_run_mode).
+; Entry: reached from motor_start_bidir_done on a COLD start, or DIRECTLY from
+; motor_start_seam on a BEMF->sine down-handoff (Flag_Sine_Handoff set). On a cold start
+; the stock init pair (comm5_comm6 + comm6_comm1) ran just before the branch, so
+; interrupts are ENABLED and sector 1 is briefly energised at the stale PCA reload
+; (bounded by startup_power_max, deadtime intact) — exactly as on the stock startup path;
+; we take control, gate the ISR duty writer, de-energise, install the hold duty, and only
+; THEN re-energise sector 1. On the down-handoff seam the FETs are ALREADY LIVE at the
+; run1 topology and IE_EA is off (from the seam): Flag_Sine_Handoff makes us SKIP the
+; switch_power_off below, keeping the rotor energised while we re-seed phase/speed and
+; take over make-before-break. Never returns (exits via exit_run_mode).
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 sine_run:
     clr  IE_EA                          ; the init pair left IE_EA enabled; take control
     setb Flag_Sine_Run                  ; [Inv 4] gate the ISR duty writer FIRST
 
+    jb   Flag_Sine_Handoff, sine_run_energised   ; seam: skip the power-off, keep FETs live
     ; [Inv 6] stop driving the FETs at the stale reload before touching the duty regs.
     call switch_power_off
+sine_run_energised:
 
     ; Initialise stepper state (Inc==0 => hold; direction = whatever motor_start selected).
     mov  Sine_Sector, #1
@@ -146,28 +151,40 @@ sine_run:
     mov  Sine_Frac_H, #0
     mov  Sine_Rcp_L, #0
     mov  Sine_Rcp_H, #0
-    ; BlueGill S3: a BEMF->sine down-handoff (Flag_Sine_Handoff, survived motor_start) pre-seeds
-    ; Sine_Inc from Sine_Inc_Seed = 2048000/Cross_Dn so the field re-enters at the rotor's
-    ; current rate instead of ramping up from 0. Normal starts (flag clear) begin at Inc=0.
+    ; BlueGill S3: a BEMF->sine down-handoff (Flag_Sine_Handoff, survived motor_start) seeds the
+    ; rotor's TRUE electrical phase (Sine_Sector) AND its actual speed (Sine_Inc, from the live
+    ; Comm_Period4x) so the field re-enters continuously instead of snapping to sector 1 at Inc=0.
+    ; Normal starts (flag clear) begin at sector 1 / Inc=0.
     ; Also reset the S3 crossover counters and disarm any stale up-handoff for the fresh run.
     mov  Sine_Step_Ticks, #0
     mov  Sine_Cross_Cnt, #0
     clr  Flag_Cross_Up_Armed
     jnb  Flag_Sine_Handoff, sine_run_inc_zero
-    clr  Flag_Sine_Handoff
-    ; [S3 direction fix] motor_start re-derived Flag_Motor_Dir_Rev from Flag_Pgm_Dir_Rev
-    ; (Bluejay.asm:912-918), NOT from sine's running direction. Sine's field convention is
-    ; Flag_Motor_Dir_Rev == Flag_Rcp_Dir_Rev, so re-assert it here (IE_EA is off since :134 =>
-    ; atomic) so sine resumes FORWARD after the down-handoff (fixes the decay-to-zero stall).
-    ; Only this handoff path re-asserts it; the normal-start sine_run_inc_zero path is unchanged.
+    ; NOTE: do NOT clr Flag_Sine_Handoff here -- the S1/S2 energise steps below still branch
+    ; on it. It is consumed at the single point sine_run_enter_done (after the energise).
+    ; [S3 direction fix] the down-handoff seam entered via motor_start_seam, which WIPED Flags0
+    ; (mov Flags0,A => Flag_Motor_Dir_Rev = 0) and SKIPPED motor_start_cold's dir-derive. Sine's
+    ; field convention is Flag_Motor_Dir_Rev == Flag_Rcp_Dir_Rev, so re-assert it here (IE_EA is off
+    ; from the seam => atomic) so sine resumes in the COMMANDED direction after the down-handoff --
+    ; a REVERSE command would otherwise resume FORWARD and brake/stall the rotor. Only this handoff
+    ; path re-asserts it; the normal-start sine_run_inc_zero path is unchanged.
     mov  C, Flag_Rcp_Dir_Rev
     mov  Flag_Motor_Dir_Rev, C
-    mov  Temp1, #Sine_Inc_Seed_L
-    mov  A, @Temp1
-    mov  Sine_Inc_L, A
-    inc  Temp1
-    mov  A, @Temp1
-    mov  Sine_Inc_H, A
+    ; [S3 down-seed / phase] Seed the TRUE electrical phase. The 6-step state at the down-handoff
+    ; is deterministic (always program-state 1), which maps to sine sector SINE_DN_SEED_SECTOR for
+    ; both directions (PLAN A.1). Seed the PREDECESSOR sector; the energise step below steps forward
+    ; into SINE_DN_SEED_SECTOR. Sine_Frac stays 0 (rotor just commutated into the state = exact
+    ; sector boundary, not an approximation).
+    mov  Sine_Sector, #(SINE_DN_SEED_SECTOR - 1)
+    ; [S3 down-seed / speed] Seed Sine_Inc DYNAMICALLY from the live slow-side period. Comm_Period4x
+    ; survives motor_start (only Flags0/1, demag, PWM limits, clock are touched), so it still holds
+    ; the debounced BEMF period; deriving the field rate from it matches the rotor's ACTUAL speed
+    ; (the static threshold seed would run slightly fast). div_2048000: A=divisor, returns
+    ; Temp3/Temp4, clobbers Temp2-8; nothing live crosses this call. Divisor is guaranteed nonzero.
+    mov  A, Comm_Period4x_H
+    call div_2048000
+    mov  Sine_Inc_L, Temp3
+    mov  Sine_Inc_H, Temp4
     sjmp sine_run_inc_done
 sine_run_inc_zero:
     mov  Sine_Inc_L, #0
@@ -176,6 +193,8 @@ sine_run_inc_done:
 
     ; [Inv 5/3] install the hold duty into the PCA reload BEFORE re-energising, so the
     ; first energisation below is at hold_amp, not the stale reload.
+    ; [S3 down-seed ORDER] This MUST stay AFTER the Sine_Inc seed above: on a down-handoff the
+    ; entry amplitude scales with the seeded handoff speed (V/f), so a refactor must NOT reorder it.
     call sine_update_amp                ; sets Sine_Amp; ignore thermal C at entry (Pwm_Limit full)
 
     ; [Inv 1b/7] Branch on the S2 micro-stepping flag. S2 does NOT use the stock comm
@@ -183,17 +202,34 @@ sine_run_inc_done:
     ; sector-1 segment (P1SKIP + clamp Com) and both modulated duties — that is S2's
     ; first energisation, at hold amplitude. S1 keeps its exact existing sequence.
     jb   Flag_Sine_Micro, sine_run_enter_s2
-    call sine_set_duty
+    call sine_set_duty                  ; [Inv 3/4] amplitude-only; independent of Sine_Sector
 
-    ; [Inv 2] re-seed sector 1 for the current direction (delta-based macros need the
+    ; [Inv 2] first energisation for the current direction (delta-based macros need the
     ; init pair after switch_power_off). This is the first energisation, now at hold_amp.
+    jnb  Flag_Sine_Handoff, sine_run_s1_stock
+    ; [S3 down-seed] seeded Sine_Sector = SINE_DN_SEED_SECTOR-1; one forward step energises
+    ; comm(SINE_DN_SEED_SECTOR-1)_comm(SINE_DN_SEED_SECTOR) -- an ABSOLUTE FET overwrite. On the
+    ; down-handoff SEAM switch_power_off is SKIPPED, so this starts from the LIVE run1 topology
+    ; (comm6_comm1), NOT all-off: a genuine MAKE-BEFORE-BREAK handover. Shoot-through safety rests on
+    ; hardware deadtime + the disjoint-leg source swap (sink phase stays driven), not on a prior all-off
+    ; (IE_EA off, Flag_Sine_Run set => t1_int cannot write a duty), leaving Sine_Sector = SINE_DN_SEED_SECTOR.
+    call sine_step_sector
+    sjmp sine_run_enter_done
+sine_run_s1_stock:
     call comm5_comm6
     call comm6_comm1
     sjmp sine_run_enter_done
 sine_run_enter_s2:
     call sine2_hw_enter                 ; XBR1=03h, enable module 2, Sine_Seg=0FFh (force remux)
-    call sine2_set_duty                 ; apply sector-1 segment + write pair/second duties
+    ; [S3 down-seed] on a down-handoff, step the seeded predecessor (SINE_DN_SEED_SECTOR-1) to
+    ; SINE_DN_SEED_SECTOR so sine2_set_duty derives segment g=(Sine_Sector-1)*32+m at the true
+    ; phase. Frac=0 => m=0. Normal starts keep Sine_Sector=1 (segment 0).
+    jnb  Flag_Sine_Handoff, sine_run_enter_s2_duty
+    inc  Sine_Sector
+sine_run_enter_s2_duty:
+    call sine2_set_duty                 ; apply the segment + write pair/second duties
 sine_run_enter_done:
+    clr  Flag_Sine_Handoff              ; single consume point (idempotent on normal starts)
 
     ; Snapshot the Timer2 pacing baseline, then make sure interrupts are enabled.
     call sine_read_timer2               ; Temp1:Temp2 = current Timer2 (16-bit)
