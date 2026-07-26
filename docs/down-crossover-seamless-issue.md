@@ -36,6 +36,25 @@ constant `SINE_DN_SEED_SECTOR=6` (bench-scannable) + a dynamic `Sine_Inc` from t
 - `sine_mode=0` baseline byte-/behaviorally-identical; app CSEG ≤0x19FD in ALL variants.
 - Residual ~175-600 rpm no-steady-state band is a plant property (out of scope), host tolerates.
 
+## ⚠ Hardware results 2026-07-26 (Subtask 2 hypothesis FALSIFIED)
+Bench: F2838 350KV + small prop, AS5600, 11.1V. Flashed the seed build, drove via host.
+- **Motor DOES enter 6-step with DWELL** (not a fast ramp): thrust 600 → 1368 mech (tele live 1395),
+  780 → 3224 mech. So the "350KV can't 6-step at no-load" note is too pessimistic WITH a small prop —
+  the up-handoff catches fine when power is held (xover_debug's continuous ramp outruns the rotor → its
+  "stall" was a ramp-rate artifact, not a real limit). Also: after every flash, `startup_power_max`
+  resets to 5 which is too low to even start forced sine — must restore ~25 (see [[esc-flash-resets-eeprom]]).
+- **Down-handoff (cross_dn=239) STILL STALLS with the seed.** Descending from 6-step, the motor drops to
+  0 rpm right at the ~187 mech handoff. Tested `SINE_DN_SEED_SECTOR` = **6 and 3** (180° apart) and
+  **sine_mode = 1 (S1) and 2 (S2)** — ALL FOUR combinations stall IDENTICALLY.
+- **Un-seeded fallback (cross_dn=255) does NOT stall** — descends jittery ~30-160 mech, keeps rotating.
+- **CONCLUSION: the sector seed is NOT the fix.** The sector value and S1/S2 path don't change the
+  outcome, so the stall is not a phase-snap. The seeded down-handoff (which routes through `motor_start`
+  → `switch_power_off` → seeded `sine_run`) stalls where the naive stock min-speed exit (cross_dn=255,
+  Sine_Inc=0, no motor_start) keeps spinning. **Prime suspects: the `motor_start` power-off gap on the
+  down transition, and/or the dynamic `Sine_Inc` seed running the field too fast at re-entry.** Redesign
+  needed — the down-handoff likely must transition WITHOUT motor_start's power-off (stay energised),
+  mirroring why the up-catch works. Sector seed may still be necessary but is insufficient alone.
+
 ## Subtasks (highest-risk-first)
 1. Baseline build/MAP. ✅ (A_H_30_24 top=0x19D7, 38 B free)
 2. Minimal down-seed experiment (sector seed + dynamic Inc seed; static Settings path kept) → HW sector scan on S2.
